@@ -22,8 +22,17 @@ With Docker (uses the `espressif/idf:v5.5` image):
 
 Each chip gets `esplab-runtime.app.bin` (for OTA and Tasmota's "Firmware Upgrade") and
 `esplab-runtime.merged.bin` (a 4 MB image to flash over USB) in `firmware/esplab-runtime/build*`.
-CI builds the same images on every push and publishes their SHA-256, so you can check that the
-images served by ESP Lab match this source.
+CI builds the same images on every push (the "firmware" workflow; images are its artifacts).
+
+**Check that ESP Lab serves this source.** Download an image from ESP Lab (for example
+`/fw/esplab-runtime.app.bin`, listed in `/fw/manifest.json`) and compare it with the CI artifact
+or your own build:
+
+    python3 firmware/tools/compare-images.py esplab-runtime.app.bin downloaded.app.bin
+
+Every byte of code and data must match. The only bytes allowed to differ are the ELF file's
+SHA-256 that ESP-IDF stamps into the image (it covers debug information, which records build
+paths) and the image checksum and hash that cover it.
 
 ## Programs and tests
 
