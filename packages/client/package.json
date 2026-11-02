@@ -1,0 +1,17 @@
+{
+  "name": "@esplab/client",
+  "version": "0.1.0",
+  "description": "Connect websites, apps and servers to ESP32 devices on the ESP Lab Hub.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@esp/protocol": "*"
+  },
+  "license": "Apache-2.0"
+}

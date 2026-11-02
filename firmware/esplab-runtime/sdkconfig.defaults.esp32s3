@@ -1,0 +1,8 @@
+# ESP32-S3: PSRAM (octal, as on N8R8/N16R8 modules) holds the program's memory when present;
+# boards without it boot normally. Only allocations that ask for PSRAM use it.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+# Boards with only the chip's USB socket: the console also runs over USB Serial/JTAG.
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y

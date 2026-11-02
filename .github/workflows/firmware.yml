@@ -1,0 +1,62 @@
+name: firmware
+
+# Builds ESP Lab Recovery and the ESP Lab Runtime (ESP-IDF + WAMR) for each chip and publishes,
+# per chip (artifact "esplab-runtime" for the ESP32, "esplab-runtime-<chip>" for the others):
+#   esplab-runtime.bin      merged 4 MB image for USB (bootloader, partitions, otadata -> app0,
+#                           ESP Lab Recovery in the factory slot, the runtime in app0)
+#   esplab-runtime.app.bin  app only, for Tasmota's "Firmware Upgrade" / OtaUrl and our own OTA
+on:
+  push:
+    paths: ['firmware/**', '.github/workflows/firmware.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5
+    strategy:
+      matrix:
+        include:
+          - { target: esp32, boot: '0x1000', artifact: esplab-runtime }
+          - { target: esp32s3, boot: '0x0', artifact: esplab-runtime-esp32s3 }
+          - { target: esp32c3, boot: '0x0', artifact: esplab-runtime-esp32c3 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP Lab Recovery
+        shell: bash
+        working-directory: firmware/esplab-recovery
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target ${{ matrix.target }}
+          idf.py build
+      - name: Build
+        shell: bash
+        working-directory: firmware/esplab-runtime
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target ${{ matrix.target }}
+          idf.py build
+          cd build
+          cp esplab-runtime.bin esplab-runtime.app.bin
+          python3 ../../tools/otadata.py 0 otadata-app0.bin
+          esptool.py --chip ${{ matrix.target }} merge_bin -o esplab-runtime.merged.bin --fill-flash-size 4MB \
+            --flash_mode dio --flash_freq 40m --flash_size 4MB \
+            ${{ matrix.boot }} bootloader/bootloader.bin 0x8000 partition_table/partition-table.bin \
+            0xE000 otadata-app0.bin 0x10000 ../../esplab-recovery/build/esplab-recovery.bin \
+            0xE0000 esplab-runtime.app.bin
+          mv esplab-runtime.merged.bin esplab-runtime.bin
+      - name: Image hashes
+        shell: bash
+        run: |
+          # The app image ends with its own SHA-256 (what /fw/manifest.json lists as "sha").
+          app=firmware/esplab-runtime/build/esplab-runtime.app.bin
+          { echo "### ${{ matrix.target }}"; echo '```'; sha256sum firmware/esplab-runtime/build/esplab-runtime.bin $app
+            echo "embedded sha (manifest): $(tail -c 32 $app | od -An -tx1 | tr -d ' \n')"; echo '```'; } >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            firmware/esplab-runtime/build/esplab-runtime.bin
+            firmware/esplab-runtime/build/esplab-runtime.app.bin
+            firmware/esplab-runtime/build/esplab-runtime.elf
+            firmware/esplab-recovery/build/esplab-recovery.bin

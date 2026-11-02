@@ -1,0 +1,11 @@
+ESP Lab device software
+Copyright 2026 Eduardo Stern
+
+This product includes software licensed under the Apache License 2.0:
+- ESP-IDF (Espressif Systems)
+- WebAssembly Micro Runtime (the Bytecode Alliance; Apache-2.0 with LLVM exception)
+- esp_websocket_client (Espressif Systems)
+- AssemblyScript (the AssemblyScript authors), used to compile programs
+
+"ESP Lab" and its logo are trademarks of their owner. The license does not grant permission to
+use them (Apache License 2.0, section 6); forks must use a different name.

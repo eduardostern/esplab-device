@@ -1,0 +1,8 @@
+# ESP Lab flash layout (4 MB), identical to Tasmota32's safeboot layout so either firmware can
+# replace the other through its own OTA upgrade.
+# Name,    Type, SubType, Offset,   Size
+nvs,       data, nvs,     0x9000,   0x5000
+otadata,   data, ota,     0xE000,   0x2000
+safeboot,  app,  factory, 0x10000,  0xD0000
+app0,      app,  ota_0,   0xE0000,  0x2D0000
+spiffs,    data, 0x82,    0x3B0000, 0x50000

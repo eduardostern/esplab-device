@@ -1,0 +1,3 @@
+# ESP32-C3 (single core, RISC-V). Boards with only the chip's USB socket: the console also runs
+# over USB Serial/JTAG.
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y

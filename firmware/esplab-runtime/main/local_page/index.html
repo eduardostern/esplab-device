@@ -1,0 +1,62 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP Lab</title>
+<style>
+:root{color-scheme:dark;--bg:#0d1014;--card:#161b22;--line:#252c36;--ink:#e6edf3;--mute:#8b96a5;--acc:#b8f36a;--warn:#f0b429}
+*{box-sizing:border-box}body{margin:0;font:15px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+header{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+header b{font-size:16px}header small{color:var(--mute)}main{padding:12px;max-width:720px;margin:auto}
+h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:18px 4px 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px}
+.v{font-variant-numeric:tabular-nums;font-weight:600}.u{color:var(--mute);font-weight:400;margin-left:3px}
+.on{color:var(--acc)}.off{color:var(--mute)}button{background:var(--acc);color:#111;border:0;border-radius:8px;padding:8px 14px;font-weight:600;font-size:14px}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}input{background:#0b0e12;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px;width:96px;font-size:15px}
+.banner{background:#2a2410;border:1px solid #5c4a12;color:var(--warn);border-radius:10px;padding:10px 14px;margin:10px 0;display:flex;justify-content:space-between;align-items:center;gap:10px}
+#login{max-width:320px;margin:15vh auto;text-align:center}#login input{width:100%;text-align:center;font-size:24px;letter-spacing:.3em;margin:14px 0}
+.err{color:#ff7b72;min-height:1.4em}.log{color:var(--mute);font-size:13px;padding:4px}
+</style></head><body>
+<header><div><b id="app">ESP Lab</b><br><small id="sub"></small></div><small id="status"></small></header>
+<div id="login" hidden><p id="t-enter"></p><input id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"><button id="go"></button><p class="err" id="lerr"></p></div>
+<main id="ui" hidden><div id="clock"></div><div id="body"></div></main>
+<script>
+const pt=/^pt/i.test(navigator.language);
+const T=pt?{enter:"Código local do aparelho (no ESP Lab, na tela do aparelho)",go:"Entrar",wrong:"Código errado",wait:"Muitas tentativas: aguarde um minuto",values:"Leituras",settings:"Ajustes",outputs:"Saídas",inputs:"Entradas",state:"Estado",commands:"Comandos",events:"Eventos",save:"Salvar",saved:"Salvo",clockNone:"Relógio não ajustado: os horários não rodam.",clockApprox:"Relógio aproximado (o aparelho ficou desligado).",useMine:"Usar a hora do celular",local:"Rede local",lost:"Sem conexão com o aparelho",on:"ligado",off:"desligado"}
+:{enter:"Device local code (shown in ESP Lab on the device's page)",go:"Log in",wrong:"Wrong code",wait:"Too many tries: wait a minute",values:"Readings",settings:"Settings",outputs:"Outputs",inputs:"Inputs",state:"State",commands:"Commands",events:"Events",save:"Save",saved:"Saved",clockNone:"Clock not set: schedules don't run.",clockApprox:"Clock approximate (the device was off).",useMine:"Use my phone's time",local:"Local network",lost:"Can't reach the device",on:"on",off:"off"};
+const $=id=>document.getElementById(id);let seq=0,m=null,st={},events=[],clock=2,timer=0,editing=null;
+$("t-enter").textContent=T.enter;$("go").textContent=T.go;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const label=n=>(m&&m.labels&&m.labels[n])||n;
+const fmt=(v,u)=>v===null||v===undefined||Number.isNaN(v)?"—":typeof v==="number"?(Math.abs(v)>=100?v.toFixed(0):+v.toFixed(2))+(u?`<span class="u">${esc(u)}</span>`:""):typeof v==="boolean"?`<span class="${v?"on":"off"}">${v?T.on:T.off}</span>`:esc(label(v));
+async function send(f){for(let i=0;i<5;i++){const r=await fetch("/frame",{method:"POST",headers:{"X-ESPLab":"1","Content-Type":"application/json"},body:JSON.stringify(f)});if(r.status!==503)return r;await new Promise(z=>setTimeout(z,800))}}
+function render(){if(!m){$("body").innerHTML="";return}
+$("app").textContent=label(m.app);$("sub").textContent=T.local+" · v"+m.ver;
+const sec=(title,rows)=>rows.length?`<h2>${title}</h2>`+rows.join(""):"";
+const card=(n,right)=>`<div class="card"><span>${esc(label(n))}</span>${right}</div>`;
+let h=sec(T.state,(m.machines||[]).map(x=>card(x.n,`<span class="v">${fmt(st[x.n])}</span>`)));
+h+=sec(T.values,(m.sensors||[]).map(x=>card(x.n,`<span class="v">${fmt(st[x.n],x.u)}</span>`)));
+h+=sec(T.outputs,(m.outputs||[]).map(x=>card(x.n,`<span class="v">${fmt(st[x.n])}</span>`)));
+h+=sec(T.inputs,(m.inputs||[]).map(x=>card(x.n,`<span class="v">${fmt(st[x.n])}</span>`)));
+h+=sec(T.settings,(m.settings||[]).map(x=>card(x.n,`<span><input type="number" step="any" min="${x.min}" max="${x.max}" data-s="${esc(x.n)}" value="${st[x.n]??x.d}"><span class="u">${esc(x.u)}</span> <button class="ghost" data-save="${esc(x.n)}">${T.save}</button></span>`)));
+h+=sec(T.commands,(m.commands||[]).map(n=>card(n,`<button data-cmd="${esc(n)}">${esc(label(n))}</button>`)));
+h+=sec(T.events,events.slice(-8).reverse().map(e=>`<div class="log">${esc(e)}</div>`));
+const keep=editing&&document.activeElement&&document.activeElement.dataset.s===editing;if(keep)return;
+$("body").innerHTML=h;}
+function renderClock(){$("clock").innerHTML=clock>=2?"":`<div class="banner"><span>${clock===1?T.clockApprox:T.clockNone}</span><button id="setclock">${T.useMine}</button></div>`}
+document.addEventListener("focusin",e=>{if(e.target.dataset&&e.target.dataset.s)editing=e.target.dataset.s});
+document.addEventListener("focusout",()=>{editing=null});
+document.addEventListener("click",async e=>{const b=e.target;
+if(b.id==="setclock"){await send({t:"time",ms:Date.now()});clock=2;renderClock()}
+if(b.dataset.cmd)await send({t:"cmd",id:"local-"+Date.now(),n:b.dataset.cmd});
+if(b.dataset.save){const i=document.querySelector(`input[data-s="${b.dataset.save}"]`);const v=Number(i.value);if(Number.isFinite(v)){await send({t:"cfg",v:{[b.dataset.save]:v}});b.textContent=T.saved;editing=null}}});
+async function poll(){clearTimeout(timer);try{const r=await fetch("/poll?since="+seq);
+if(r.status===401)return showLogin();if(r.status===503){timer=setTimeout(poll,1000);return}const j=await r.json();if(j.seq<seq){seq=0;m=null;st={}}seq=j.seq;
+if(j.clock!==clock){clock=j.clock;renderClock()}
+if(!m&&!j.frames.some(f=>f.t==="hello")&&Date.now()-(window.synced||0)>3000){window.synced=Date.now();send({t:"sync"})}
+for(const f of j.frames){if(f.t==="hello"){m=f.m;st={}}else if(f.t==="state")Object.assign(st,f.v||{});else if(f.t==="evt")events.push(new Date().toLocaleTimeString()+"  "+label(f.n)+(f.v!==undefined?" ("+f.v+")":""))}
+$("status").textContent="";render()}catch{$("status").textContent=T.lost}timer=setTimeout(poll,1000)}
+function showLogin(){$("ui").hidden=true;$("login").hidden=false;$("code").focus()}
+async function start(){$("login").hidden=true;$("ui").hidden=false;await send({t:"sync"});poll()}
+$("go").onclick=async()=>{const r=await fetch("/login",{method:"POST",body:$("code").value});if(r.ok)return start();$("lerr").textContent=r.status===429?T.wait:T.wrong};
+$("code").onkeydown=e=>{if(e.key==="Enter")$("go").click()};
+fetch("/poll?since=0").then(r=>r.status===401?showLogin():start()).catch(showLogin);
+</script></body></html>

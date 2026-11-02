@@ -1,0 +1,41 @@
+dependencies:
+  espressif/esp_websocket_client:
+    component_hash: 
+      dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.8.0
+  espressif/wasm-micro-runtime:
+    component_hash: 
+      04f25aad2896b5e906397a061d35cce560609bebd3913a4be7e365ecbf2dd9d6
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32s3
+    - esp32c3
+    - esp32c6
+    - esp32p4
+    - esp32c5
+    version: 2.4.0~1
+  idf:
+    source:
+      type: idf
+    version: 5.5.0
+direct_dependencies:
+- espressif/esp_websocket_client
+- espressif/wasm-micro-runtime
+- idf
+manifest_hash: 07bbe206c5368582ade93c27ec4275cdde0c9c881d9141c1f711479a273bb4dc
+target: esp32
+version: 2.0.0

@@ -1,0 +1,21 @@
+{
+  "name": "@esp/runtime-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ESP Lab Runtime SDK: the AssemblyScript 'esp', 'lab' and 'io' libraries, program packing and the AI reference",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/drivers.test.mjs && tsx test/i2c.test.mjs && tsx test/local.test.mjs"
+  },
+  "devDependencies": {
+    "assemblyscript": "0.28.20",
+    "esbuild": "^0.25.0"
+  },
+  "dependencies": {},
+  "license": "Apache-2.0"
+}

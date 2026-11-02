@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.3"
+  espressif/wasm-micro-runtime: "^2.4.0"
+  espressif/esp_websocket_client: "^1.4.0"

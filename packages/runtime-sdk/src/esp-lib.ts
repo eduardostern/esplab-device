@@ -1,0 +1,93 @@
+/**
+ * The AssemblyScript source of the `esp` library that programs import:
+ *
+ *   import { pinMode, digitalWrite, delay, println, OUTPUT, HIGH, LOW } from "esp";
+ *
+ * It is handed to the compiler as `lib/esp.ts` (a library file), and is the only API between a
+ * program and the ESP Lab Runtime firmware. The @external names must match the NativeSymbol table
+ * in firmware/esplab-runtime/main/main.c.
+ */
+export const ESP_LIB_SOURCE = `// ESP Lab Runtime API (module "esp"). Arduino-style names.
+
+export const LOW: i32 = 0;
+export const HIGH: i32 = 1;
+export const INPUT: i32 = 0;
+export const OUTPUT: i32 = 1;
+export const INPUT_PULLUP: i32 = 2;
+export const INPUT_PULLDOWN: i32 = 3;
+
+/** Configure a GPIO: INPUT, OUTPUT, INPUT_PULLUP or INPUT_PULLDOWN. */
+@external("esp", "pinMode") export declare function pinMode(pin: i32, mode: i32): void;
+/** Drive an output pin HIGH (1) or LOW (0). */
+@external("esp", "digitalWrite") export declare function digitalWrite(pin: i32, value: i32): void;
+/** Read a pin: 1 or 0. */
+@external("esp", "digitalRead") export declare function digitalRead(pin: i32): i32;
+/** 12-bit ADC reading (0..4095). ADC1 pins only: 32, 33, 34, 35, 36, 39. */
+@external("esp", "analogRead") export declare function analogRead(pin: i32): i32;
+/** PWM duty 0..255 at 5 kHz (LED brightness, motor speed). Up to 8 pins. */
+@external("esp", "analogWrite") export declare function analogWrite(pin: i32, duty: i32): void;
+/** Pause this program for ms milliseconds (other tasks keep running). */
+@external("esp", "delay") export declare function delay(ms: i32): void;
+/** Busy-wait up to 100000 microseconds. */
+@external("esp", "delayMicroseconds") export declare function delayMicroseconds(us: i32): void;
+/** Milliseconds since boot. */
+@external("esp", "millis") export declare function millis(): i64;
+/** Microseconds since boot. */
+@external("esp", "micros") export declare function micros(): i64;
+/** Random integer in [0, max). */
+@external("esp", "random") export declare function random(max: i32): i32;
+
+@external("esp", "print") declare function printUtf16(ptr: usize, bytes: i32): void;
+
+/** Write text to the serial console. */
+export function print(text: string): void {
+  printUtf16(changetype<usize>(text), text.length << 1);
+}
+
+/** Write text and a newline to the serial console. */
+export function println(text: string = ""): void {
+  print(text + "\\n");
+}
+
+/** Start the I2C bus. Returns 0 on success. */
+@external("esp", "i2cBegin") export declare function i2cBegin(sda: i32, scl: i32, hz: i32): i32;
+@external("esp", "i2cWrite") declare function i2cWriteRaw(address: i32, data: usize, length: i32): i32;
+@external("esp", "i2cRead") declare function i2cReadRaw(address: i32, data: usize, length: i32): i32;
+
+/** Write bytes to a 7-bit I2C address. Returns 0 on success. */
+export function i2cWrite(address: i32, data: Uint8Array): i32 {
+  return i2cWriteRaw(address, data.dataStart, data.length);
+}
+
+/** Read length bytes from a 7-bit I2C address; null if the device did not answer. */
+export function i2cRead(address: i32, length: i32): Uint8Array | null {
+  const buffer = new Uint8Array(length);
+  return i2cReadRaw(address, buffer.dataStart, length) == 0 ? buffer : null;
+}
+`;
+
+/** Starter program for new ESP Lab Runtime projects, blinking the board's LED. */
+export function starterProgram(ledPin = 2, boardName = 'DevKit'): string {
+  return STARTER_PROGRAM.replace('const LED = 2; // the DevKit\'s on-board LED', `const LED = ${ledPin}; // the ${boardName}'s on-board LED`);
+}
+
+export const STARTER_PROGRAM = `import { pinMode, digitalWrite, delay, println, OUTPUT, HIGH, LOW } from "esp";
+
+const LED = 2; // the DevKit's on-board LED
+
+let count = 0;
+
+export function setup(): void {
+  pinMode(LED, OUTPUT);
+  println("hello from ESP Lab Runtime");
+}
+
+export function loop(): void {
+  digitalWrite(LED, HIGH);
+  delay(500);
+  digitalWrite(LED, LOW);
+  delay(500);
+  count++;
+  println("blinks: " + count.toString());
+}
+`;
