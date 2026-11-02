@@ -1,5 +1,5 @@
 idf_component_register(
-  SRCS "main.c" "net.c" "portal.c" "local.c" "clock.c"
+  SRCS "main.c" "net.c" "portal.c" "local.c" "clock.c" "labhost.c"
   INCLUDE_DIRS "."
   REQUIRES pthread esp_driver_gpio esp_driver_ledc esp_driver_i2c esp_driver_uart esp_driver_spi esp_driver_usb_serial_jtag esp_psram esp_adc esp_partition esp_timer mbedtls
            nvs_flash esp_wifi esp_netif esp_event app_update json esp_http_server lwip

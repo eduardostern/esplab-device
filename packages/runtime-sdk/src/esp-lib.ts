@@ -38,15 +38,50 @@ export const INPUT_PULLDOWN: i32 = 3;
 @external("esp", "random") export declare function random(max: i32): i32;
 
 @external("esp", "print") declare function printUtf16(ptr: usize, bytes: i32): void;
+// Numbers are formatted and parsed by the firmware (runtime 0.13+), so programs don't carry
+// the number-to-text code, and printing a number creates no string.
+@external("esp", "printNum") declare function printNumRaw(v: f64, decimals: i32): void;
+@external("esp", "fmtNum") declare function fmtNumRaw(v: f64, decimals: i32, out: usize, capBytes: i32): i32;
+@external("esp", "parseNum") declare function parseNumRaw(ptr: usize, bytes: i32): f64;
 
-/** Write text to the serial console. */
-export function print(text: string): void {
+@inline function printText(text: string): void {
   printUtf16(changetype<usize>(text), text.length << 1);
 }
 
-/** Write text and a newline to the serial console. */
-export function println(text: string = ""): void {
-  print(text + "\\n");
+/**
+ * Write text, a number or a bool to the serial console. Numbers print as integers when whole,
+ * or with "decimals" digits: print(t, 1) gives "25.5".
+ */
+export function print<T>(value: T, decimals: i32 = -1): void {
+  if (isString<T>()) printText(changetype<string>(value));
+  else if (isBoolean<T>()) printText(value ? "true" : "false");
+  else if (isInteger<T>()) printNumRaw(<f64>value, 0);
+  else if (isFloat<T>()) printNumRaw(<f64>value, decimals);
+  else ERROR("print() takes text, a number or a bool");
+}
+
+function blank<T>(): T {
+  if (isString<T>()) return changetype<T>("");
+  else return <T>0;
+}
+
+/** print() and a newline. Print parts one by one (print("t = "); println(t, 1)) instead of joining strings with +. */
+export function println<T = string>(value: T = blank<T>(), decimals: i32 = -1): void {
+  print<T>(value, decimals);
+  printText("\\n");
+}
+
+const NUM_BUF = memory.data(64);
+
+/** A number as text: whole numbers without decimals, others shortest, or with "decimals" digits. */
+export function numText(v: f64, decimals: i32 = -1): string {
+  const n = fmtNumRaw(v, decimals, NUM_BUF, 64);
+  return String.UTF16.decodeUnsafe(NUM_BUF, n);
+}
+
+/** The number at the start of the text (like parseFloat): NaN if there is none. */
+export function parseNum(text: string): f64 {
+  return parseNumRaw(changetype<usize>(text), text.length << 1);
 }
 
 /** Start the I2C bus. Returns 0 on success. */
@@ -71,7 +106,7 @@ export function starterProgram(ledPin = 2, boardName = 'DevKit'): string {
   return STARTER_PROGRAM.replace('const LED = 2; // the DevKit\'s on-board LED', `const LED = ${ledPin}; // the ${boardName}'s on-board LED`);
 }
 
-export const STARTER_PROGRAM = `import { pinMode, digitalWrite, delay, println, OUTPUT, HIGH, LOW } from "esp";
+export const STARTER_PROGRAM = `import { pinMode, digitalWrite, delay, print, println, OUTPUT, HIGH, LOW } from "esp";
 
 const LED = 2; // the DevKit's on-board LED
 
@@ -88,6 +123,7 @@ export function loop(): void {
   digitalWrite(LED, LOW);
   delay(500);
   count++;
-  println("blinks: " + count.toString());
+  print("blinks: ");
+  println(count);
 }
 `;

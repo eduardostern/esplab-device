@@ -1,16 +1,18 @@
 /**
  * The AssemblyScript source of the `io` library: buses and device drivers for programs.
  *
- *   import { Serial, ModbusRtu, OneWire, Ds18b20, Spi, LoRa, LoraNode, LoraGateway } from "io";
+ *   import { Serial, ModbusRtu, OneWire, Ds18b20, Ssd1306, Panel, Spi, LoRa, LoraNode, LoraGateway } from "io";
  *
  * Serial ports and RS-485, Modbus RTU (energy meters, inverters, VFDs), 1-Wire with DS18B20
  * temperature probes, SPI, the SX1276/77/78 (RFM95) LoRa radio, and a signed LoRa link that
  * makes battery or remote nodes appear in ESP Lab through a gateway. Handed to the compiler as
  * `lib/io.ts`; the @external names match the firmware's NativeSymbol table.
  */
+import { FONT5X7_AS } from './font5x7';
+
 export const IO_LIB_SOURCE = String.raw`// ESP Lab I/O library (module "io"): buses and drivers.
-import { delay, millis, print, pinMode, digitalWrite, OUTPUT, i2cBegin, i2cWrite, i2cRead } from "esp";
-import { App, Output, Input, Pcf8574, setTransport, deliver, onSubFrame, sendToHub, watchPin, jsonString } from "lab";
+import { delay, millis, print, numText, pinMode, digitalWrite, OUTPUT, i2cBegin, i2cWrite, i2cRead } from "esp";
+import { App, Output, Input, Pcf8574, Setting, Args, setTransport, deliver, onSubFrame, sendToHub, watchPin, jsonString } from "lab";
 
 @external("esp", "uartOpen") declare function uartOpenRaw(port: i32, baud: i32, tx: i32, rx: i32, de: i32, config: i32): i32;
 @external("esp", "uartWrite") declare function uartWriteRaw(port: i32, data: usize, length: i32): i32;
@@ -1103,6 +1105,284 @@ function gatewayCheckSilent(): void {
       gw.online[k] = false;
       sendToHub('{"t":"sub","id":' + jsonString(gw.ids[k]) + ',"f":{"t":"bye"}}');
     }
+  }
+}
+
+// ---- SSD1306 / SH1106 OLED displays (I2C) ----------------------------------------------------
+
+${FONT5X7_AS}
+
+/**
+ * A 0.96" SSD1306 (or 1.3" SH1106) OLED on I2C, 128x64 or 128x32, address 0x3C (0x3D with the
+ * module's address jumper moved). Draw into the buffer, then show() sends the changed parts.
+ * Text uses a 5x7 font (6 x 8 pixels per character at size 1: 21 characters x 8 lines).
+ */
+export class Ssd1306 {
+  readonly width: i32 = 128;
+  ok: bool = false;
+  buf: Uint8Array;
+  private pages: i32;
+  /** What the display shows now: show() sends only the pages that differ (I2C is slow). */
+  private shown: Uint8Array;
+  private fresh: bool = true;
+  private out: Uint8Array = new Uint8Array(129);
+  private cmd1: Uint8Array = new Uint8Array(2);
+  constructor(public address: i32 = 0x3c, sda: i32 = 21, scl: i32 = 22, public height: i32 = 64, public sh1106: bool = false) {
+    this.buf = new Uint8Array(128 * (height / 8));
+    this.shown = new Uint8Array(128 * (height / 8));
+    this.pages = height / 8;
+    i2cBegin(sda, scl, 100000);
+    this.begin();
+  }
+  private command(c: i32): bool {
+    this.cmd1[0] = 0x00;
+    this.cmd1[1] = <u8>c;
+    return i2cWrite(this.address, this.cmd1) == 0;
+  }
+  /** Sends the power-on sequence; called by the constructor. ok tells whether the display answered. */
+  begin(): bool {
+    const ssd: i32[] = [0xae, 0xd5, 0x80, 0xa8, this.height - 1, 0xd3, 0x00, 0x40, 0x8d, 0x14, 0x20, 0x00, 0xa1, 0xc8, 0xda, this.height == 64 ? 0x12 : 0x02, 0x81, 0xcf, 0xd9, 0xf1, 0xdb, 0x40, 0xa4, 0xa6, 0xaf];
+    const sh: i32[] = [0xae, 0xd5, 0x80, 0xa8, this.height - 1, 0xd3, 0x00, 0x40, 0xad, 0x8b, 0xa1, 0xc8, 0xda, 0x12, 0x81, 0x80, 0xd9, 0x22, 0xdb, 0x35, 0xa4, 0xa6, 0xaf];
+    const seq = this.sh1106 ? sh : ssd;
+    this.ok = true;
+    for (let i = 0; i < seq.length; i++) this.ok = this.command(seq[i]) && this.ok;
+    if (!this.ok) print("[io] no OLED answered at 0x" + (<u32>this.address).toString(16) + "\n");
+    this.clear();
+    this.fresh = true;
+    this.show();
+    return this.ok;
+  }
+  clear(): void { this.buf.fill(0); }
+  pixel(x: i32, y: i32, on: bool = true): void {
+    if (x < 0 || x >= 128 || y < 0 || y >= this.height) return;
+    const at = (y >> 3) * 128 + x;
+    const bit: i32 = 1 << (y & 7);
+    const before: i32 = this.buf[at];
+    const after: i32 = on ? before | bit : before & ~bit;
+    if (after != before) this.buf[at] = <u8>after;
+  }
+  fillRect(x: i32, y: i32, w: i32, h: i32, on: bool = true): void {
+    for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) this.pixel(i, j, on);
+  }
+  rect(x: i32, y: i32, w: i32, h: i32): void {
+    this.line(x, y, x + w - 1, y); this.line(x, y + h - 1, x + w - 1, y + h - 1);
+    this.line(x, y, x, y + h - 1); this.line(x + w - 1, y, x + w - 1, y + h - 1);
+  }
+  line(x0: i32, y0: i32, x1: i32, y1: i32, on: bool = true): void {
+    const dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    const dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      this.pixel(x0, y0, on);
+      if (x0 == x1 && y0 == y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+  /** A horizontal bar filled to fraction (0..1), e.g. a tank level. */
+  bar(x: i32, y: i32, w: i32, h: i32, fraction: f64): void {
+    this.rect(x, y, w, h);
+    const f = fraction < 0 ? 0 : fraction > 1 ? 1 : fraction;
+    this.fillRect(x + 2, y + 2, <i32>Math.round(<f64>(w - 4) * f), h - 4);
+  }
+  /** Text at (x, y) (top-left), size 1-4; returns the x after it. on = false draws dark text (on a lit area). */
+  text(x: i32, y: i32, s: string, size: i32 = 1, on: bool = true): i32 {
+    for (let i = 0; i < s.length; i++) {
+      const g = glyphIndex(s.charCodeAt(i)) * 5;
+      for (let col = 0; col < 5; col++) {
+        const bits: i32 = FONT5X7[g + col];
+        for (let row = 0; row < 7; row++) {
+          if ((bits >> row) & 1) {
+            if (size == 1) this.pixel(x + col, y + row, on);
+            else this.fillRect(x + col * size, y + row * size, size, size, on);
+          }
+        }
+      }
+      x += 6 * size;
+    }
+    return x;
+  }
+  /** Width of a text in pixels. */
+  textWidth(s: string, size: i32 = 1): i32 { return s.length * 6 * size; }
+  /** Text ending at the right edge (or at xRight). */
+  textRight(y: i32, s: string, size: i32 = 1, xRight: i32 = 128, on: bool = true): void { this.text(xRight - this.textWidth(s, size) + size, y, s, size, on); }
+  /** Text centred on the screen. */
+  textCenter(y: i32, s: string, size: i32 = 1): void { this.text((128 - this.textWidth(s, size) + size) / 2, y, s, size); }
+  invert(on: bool): void { this.command(on ? 0xa7 : 0xa6); }
+  contrast(level: i32): void { this.command(0x81); this.command(level & 0xff); }
+  /** Panel on (true) or off (false, keeps the picture). */
+  power(on: bool): void { this.command(on ? 0xaf : 0xae); }
+  /** Sends the parts of the picture that changed since the last show() (unchanged: nothing is sent). */
+  show(): void {
+    for (let p = 0; p < this.pages; p++) {
+      let same = !this.fresh;
+      for (let i = 0; same && i < 128; i++) same = this.buf[p * 128 + i] == this.shown[p * 128 + i];
+      if (same) continue;
+      if (this.sh1106) {
+        this.command(0xb0 | p); this.command(0x02); this.command(0x10);
+      } else {
+        this.command(0x21); this.command(0); this.command(127);
+        this.command(0x22); this.command(p); this.command(p);
+      }
+      this.out[0] = 0x40;
+      for (let i = 0; i < 128; i++) { const b = this.buf[p * 128 + i]; this.out[1 + i] = b; this.shown[p * 128 + i] = b; }
+      this.ok = i2cWrite(this.address, this.out) == 0;
+    }
+    this.fresh = false;
+  }
+}
+
+/** A number for a small screen: whole above 100, else one decimal; "--" when unknown. */
+export function shortNumber(v: f64): string {
+  if (isNaN(v)) return "--";
+  if (Math.abs(v) >= 100) return numText(Math.round(v), 0);
+  const tenths = Math.round(v * 10);
+  return numText(tenths == 0 ? 0 : tenths / 10, 1);
+}
+
+// ---- Panel: a front panel for a lab app (display + buttons) ----------------------------------
+
+let thePanel: Panel | null = null;
+function panelTick(): void { const p = thePanel; if (p != null) p.tick(); }
+function panelUp(): void { const p = thePanel; if (p != null) p.key(1); }
+function panelDown(): void { const p = thePanel; if (p != null) p.key(2); }
+function panelOk(): void { const p = thePanel; if (p != null) p.key(3); }
+function panelBack(): void { const p = thePanel; if (p != null) p.key(4); }
+
+/**
+ * A ready-made front panel: a status screen with the app's states, values and outputs, and a menu
+ * (OK) to change settings and run commands with up/down buttons. Settings changed here are saved
+ * and sent to ESP Lab. Hold OK (or press BACK) to go back; idle for 30 s returns to the status.
+ *   new Panel(app, new Ssd1306(0x3c, 21, 22), app.button("up", 32), app.button("down", 33), app.button("ok", 25));
+ */
+export class Panel {
+  screen: i32 = 0; // 0 status, 1 menu, 2 editing a setting, 3 message
+  scroll: i32 = 0;
+  cursor: i32 = 0;
+  editValue: f64 = 0;
+  step: f64 = 1;
+  idleAt: i64 = 0;
+  message: string = "";
+  constructor(public app: App, public oled: Ssd1306, up: Input, down: Input, ok: Input, back: Input | null = null, public title: string = "") {
+    thePanel = this;
+    up.autoRepeat(150);
+    down.autoRepeat(150);
+    app.on(up.name + ".press", panelUp);
+    app.on(up.name + ".repeat", panelUp);
+    app.on(down.name + ".press", panelDown);
+    app.on(down.name + ".repeat", panelDown);
+    app.on(ok.name + ".press", panelOk);
+    app.on(ok.name + ".long", panelBack);
+    if (back != null) app.on(back.name + ".press", panelBack);
+    app.every(500, panelTick);
+  }
+  private lines(): i32 { return (this.oled.height - 10) / 9; }
+  private statusRows(): string[] {
+    const a = this.app;
+    const rows: string[] = [];
+    for (let i = 0; i < a.machines.length; i++) rows.push(a.labelOf(a.machines[i].name) + "|" + a.labelOf(a.machines[i].state));
+    for (let i = 0; i < a.sensors.length; i++) {
+      const x = a.sensors[i];
+      rows.push(a.labelOf(x.name) + "|" + shortNumber(x.value) + (x.unit.length && !isNaN(x.value) ? " " + x.unit : ""));
+    }
+    for (let i = 0; i < a.outputs.length; i++) rows.push(a.labelOf(a.outputs[i].name) + "|" + (a.outputs[i].isOn ? "ON" : "off"));
+    return rows;
+  }
+  /** Menu entries: settings, then commands, then Back. */
+  private menuCount(): i32 { return this.app.settings.length + this.app.commands.length + 1; }
+  private menuRow(i: i32): string {
+    const a = this.app;
+    if (i < a.settings.length) {
+      const x = a.settings[i];
+      return a.labelOf(x.name) + "|" + shortNumber(x.value) + (x.unit.length ? " " + x.unit : "");
+    }
+    i -= a.settings.length;
+    if (i < a.commands.length) return a.labelOf(a.commands[i].name) + "|>";
+    return "Back|";
+  }
+  key(k: i32): void {
+    this.idleAt = millis();
+    const a = this.app;
+    if (this.screen == 3) { this.screen = 1; this.draw(); return; }
+    if (this.screen == 0) {
+      const max = this.statusRows().length - this.lines();
+      if (k == 1 && this.scroll > 0) this.scroll--;
+      else if (k == 2 && this.scroll < max) this.scroll++;
+      else if (k == 3) { this.screen = 1; this.cursor = 0; this.scroll = 0; }
+    } else if (this.screen == 1) {
+      const n = this.menuCount();
+      if (k == 1) this.cursor = (this.cursor + n - 1) % n;
+      else if (k == 2) this.cursor = (this.cursor + 1) % n;
+      else if (k == 4) { this.screen = 0; this.scroll = 0; }
+      else if (k == 3) {
+        if (this.cursor < a.settings.length) {
+          const x = a.settings[this.cursor];
+          this.editValue = x.value;
+          const range = x.max - x.min;
+          this.step = range <= 2 ? 0.1 : range <= 20 ? 0.5 : range <= 200 ? 1 : range <= 2000 ? 10 : 100;
+          this.screen = 2;
+        } else if (this.cursor < a.settings.length + a.commands.length) {
+          const c = a.commands[this.cursor - a.settings.length];
+          const args = new Args();
+          c.handler(args);
+          this.message = args.error.length ? args.error : a.labelOf(c.name) + ": done";
+          this.screen = 3;
+        } else {
+          this.screen = 0;
+          this.scroll = 0;
+        }
+      }
+    } else if (this.screen == 2) {
+      const x = a.settings[this.cursor];
+      if (k == 1) this.editValue = Math.min(x.max, Math.round((this.editValue + this.step) / this.step) * this.step);
+      else if (k == 2) this.editValue = Math.max(x.min, Math.round((this.editValue - this.step) / this.step) * this.step);
+      else if (k == 3) { a.setLocally(x, this.editValue); this.message = a.labelOf(x.name) + " saved"; this.screen = 3; }
+      else if (k == 4) this.screen = 1;
+    }
+    this.draw();
+  }
+  tick(): void {
+    if (this.screen != 0 && millis() - this.idleAt > 30000) { this.screen = 0; this.scroll = 0; }
+    this.draw();
+  }
+  private header(text: string): void {
+    this.oled.fillRect(0, 0, 128, 9);
+    this.oled.text(2, 1, text, 1, false);
+  }
+  private row(i: i32, text: string, selected: bool): void {
+    const y = 11 + i * 9;
+    const cut = text.indexOf("|");
+    const left = cut >= 0 ? text.substring(0, cut) : text;
+    const right = cut >= 0 ? text.substring(cut + 1) : "";
+    if (selected) this.oled.fillRect(0, y - 1, 128, 9);
+    const room = 21 - right.length - (right.length ? 1 : 0);
+    this.oled.text(1, y, left.length > room ? left.substring(0, room) : left, 1, !selected);
+    if (right.length) this.oled.textRight(y, right, 1, 127, !selected);
+  }
+  draw(): void {
+    const o = this.oled;
+    const a = this.app;
+    o.clear();
+    if (this.screen == 0) {
+      this.header(this.title.length ? this.title : a.labelOf(a.name));
+      const rows = this.statusRows();
+      for (let i = 0; i < this.lines() && this.scroll + i < rows.length; i++) this.row(i, rows[this.scroll + i], false);
+    } else if (this.screen == 1) {
+      this.header("Menu");
+      const n = this.menuCount();
+      const first = this.cursor < this.lines() ? 0 : this.cursor - this.lines() + 1;
+      for (let i = 0; i < this.lines() && first + i < n; i++) this.row(i, this.menuRow(first + i), first + i == this.cursor);
+    } else if (this.screen == 2) {
+      const x = a.settings[this.cursor];
+      this.header(a.labelOf(x.name));
+      o.textCenter(o.height / 2 - 8, shortNumber(this.editValue) + (x.unit.length ? " " + x.unit : ""), 2);
+      if (o.height >= 64) o.textCenter(o.height - 9, shortNumber(x.min) + " .. " + shortNumber(x.max), 1);
+    } else {
+      this.header(a.labelOf(a.name));
+      o.textCenter(o.height / 2 - 4, this.message, 1);
+    }
+    o.show();
   }
 }
 `;

@@ -7,26 +7,30 @@ The entry file is main.ts. Export setup() (runs once) and/or loop() (runs repeat
 Import the hardware API from "esp":
 
   import { pinMode, digitalWrite, digitalRead, analogRead, analogWrite, delay, delayMicroseconds,
-           millis, micros, random, print, println, i2cBegin, i2cWrite, i2cRead,
+           millis, micros, random, print, println, numText, parseNum, i2cBegin, i2cWrite, i2cRead,
            INPUT, OUTPUT, INPUT_PULLUP, INPUT_PULLDOWN, HIGH, LOW } from "esp";
 
   pinMode(pin: i32, mode: i32)        digitalWrite(pin: i32, value: i32)   digitalRead(pin: i32): i32
   analogRead(pin: i32): i32  (0..4095, ADC1 pins: ESP32 32-36,39; S3 1-10; C3 0-4)   analogWrite(pin: i32, duty: i32) (0..255 PWM)
   delay(ms: i32)   delayMicroseconds(us: i32)   millis(): i64   micros(): i64   random(max: i32): i32
-  print(text: string)   println(text: string = "")
+  print(value)   println(value = "")   value: text, a number or a bool; numbers print whole, or
+      print(x, decimals): println(t, 1) prints "25.5". Print parts one by one instead of joining
+      strings: print("count "); println(n). That keeps a program a few hundred bytes.
+  numText(v: f64, decimals: i32 = -1): string   parseNum(text: string): f64 (NaN if no number)
   i2cBegin(sda: i32, scl: i32, hz: i32): i32   i2cWrite(addr: i32, data: Uint8Array): i32
   i2cRead(addr: i32, length: i32): Uint8Array | null
 
 AssemblyScript rules that differ from TypeScript:
 - Numbers are typed: i32, u32, i64, f32, f64 (number = f64). Integer literals default to i32.
   millis() returns i64, so store it in an i64: let last: i64 = 0; if (millis() - last >= 1000) {...}
-- Convert numbers to text with .toString() (n.toString(), x.toFixed(2) is not available; use (<i32>x).toString()).
+- Print numbers directly (println(n), println(x, 2)). For text use numText(x) / numText(x, 2); x.toFixed() is not available.
 - No any, no union types except T | null, no closures that capture locals, no try/catch.
-- Strings concatenate with +. Arrays: Array<i32>, StaticArray<i32>, Uint8Array.
+- Strings concatenate with +, but each + creates a string and brings in the memory manager (~3 KB). Arrays: Array<i32>, StaticArray<i32>, Uint8Array.
 - Module-level let/const variables keep state between loop() calls.
 - delay() lets the rest of the device run; avoid busy loops without delay().
 
 Runtime behaviour:
+- The program compiles to WebAssembly; the firmware's WAMR interpreter executes that bytecode on the device.
 - The firmware prints "[vm] ready (N byte program, ...)" when a program starts.
 - A crash prints "[vm] abort: <message> (<file>:<line>:<col>)" or "[vm] trap in loop(): <reason>" and stops the program.
 - Programs get 64 KiB of memory when the device uses Wi-Fi and up to 128 KiB offline or on an
@@ -90,7 +94,7 @@ turns off as soon as the output it needs turns off. On a trap all outputs go to 
 export const IO_REFERENCE = `The "io" library (import from "io") has buses and device drivers for lab programs:
 
   import { Serial, ModbusRtu, regsToFloat, regsToU32, regToI16, SERIAL_8N1, SERIAL_8E1,
-           OneWire, Ds18b20, Ads1115, Spi, LoRa, LoraNode, LoraGateway } from "io";
+           OneWire, Ds18b20, Ads1115, Ssd1306, Panel, shortNumber, Spi, LoRa, LoraNode, LoraGateway } from "io";
 
 Serial ports (UART1/UART2; the ESP32-C3 has only port 1). dePin drives an RS-485 transceiver:
   const bus = new Serial(2, 9600, 17, 16, 4 /* DE pin, -1 if none */, SERIAL_8N1);
@@ -147,6 +151,19 @@ Linear and accurate, unlike the ESP32 ADC: use it for thermistors, current shunt
 failed (adc.ok false). An NTC on it: ntcCelsius-style maths on the volts, e.g. R = 10000 * v / (3.3 - v).
 I2C pins: DevKit SDA 21 / SCL 22; ESP32-C3 SuperMini SDA 6 / SCL 7 (its 8/9 share the LED and BOOT button). Any
 free GPIOs work; 4.7k pull-ups to 3V3 (most breakout modules have them). Several chips share the two wires.
+
+OLED display (the 0.96" SSD1306 128x64 I2C module, or the 1.3" SH1106): const oled = new Ssd1306(0x3c, sda, scl)
+(height 32 for 128x32 modules; 5th argument true for SH1106). Draw then call oled.show(): oled.clear();
+oled.text(0, 0, "Pool", 2); oled.text(0, 20, "Water " + shortNumber(water.value) + " °C"); oled.bar(0, 40, 128, 10, 0.6);
+textRight / textCenter, line, rect, fillRect, pixel, invert, contrast. 5x7 font: 21 characters x 8 lines at size 1
+(accents are drawn without them; ° works). Redraw from app.every(500, draw) or on events, not in a busy loop.
+Buttons: app.button(name, pin) (to GND) fires "<name>.on"/".off" and gestures: "<name>.press" (short press),
+"<name>.long" (held 800 ms), ".repeat" while held with .autoRepeat(150), ".double" with .doublePress(400).
+Use them as machine events (m.on("idle", "ok.press", always, "menu")) or app.on("up.press", fn).
+app.buttonAt(name, expander, bit) for buttons on a PCF8574/PCF8575.
+Front panel in one line: new Panel(app, oled, app.button("up", 32), app.button("down", 33), app.button("ok", 25))
+shows a status screen (machine states, values, outputs) and an OK menu to edit settings (saved and sent to ESP Lab)
+and run commands; hold OK to go back. Labels from app.label() are what it shows.
 
 Pentair IntelliFlo on RS-485: const p = new PentairPump(bus, 0x60); call p.set(rpm) each tick (0 stops;
 it repeats every 10 s, as the pump needs); p.watts and p.reportedRpm come from the pump.

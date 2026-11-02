@@ -29,14 +29,19 @@
  *   pcf:ADDR:BIT  a PCF8574 / PCF8575 pin level held by the circuit (ADDR like 0x22; BIT 0-15,
  *                 8-15 = P10-P17 of a PCF8575); true = high (released), false = pulled to GND
  *   ads1115:ADDR:CH  volts on input CH (0-3) of an ADS1115 at ADDR (0x48-0x4B); unset inputs read 0 V
+ *   (an SSD1306/SH1106 OLED answers at 0x3C and 0x3D unless a pcf: key uses that address)
  *   modbus:U:R    holding and input register R of Modbus unit U (on the serial port)
  * Expectations ("expect"): any reported value, setting, output, input or machine name; relay:N
  * (KC868-A6 relay on); gpio:N (output level); pcf:ADDR:BIT (expander output latch: true = high,
  * false = driven low); event:NAME (emitted at least once so far);
  * modbus:U:R (register written by the program). Numbers match within 0.05, or give
- * { "min": a, "max": b }; { "not": x } matches anything but x.
+ * { "min": a, "max": b }; { "not": x } matches anything but x; { "contains": "text" } for text.
+ * display:ADDR (0x3c) is the text on an SSD1306/SH1106 OLED, read back line by line (5x7 font).
  */
+import { jsonImports } from './json-host';
+import { numberImports } from './numfmt';
 import { adcRaw, type AdcChip } from './adc';
+import { FONT5X7 } from './font5x7';
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -89,7 +94,7 @@ export interface ScenarioResult {
 export const SCENARIO_COMPILE_FLAGS = ['--exportStart', '_start'];
 
 /** Bump when the runner changes, so browsers load the new one. */
-export const SCENARIO_RUNNER_VERSION = '1';
+export const SCENARIO_RUNNER_VERSION = '2';
 
 /** Parses tests.json; throws with a readable message. */
 export function parseScenarioFile(text: string): ScenarioFile {
@@ -185,6 +190,7 @@ function matches(expected: Json, actual: Json): boolean {
   if (expected !== null && typeof expected === 'object' && !Array.isArray(expected)) {
     const e = expected as Record<string, Json>;
     if ('not' in e) return !matches(e.not, actual);
+    if ('contains' in e) return typeof actual === 'string' && actual.includes(String(e.contains));
     if ('min' in e || 'max' in e) {
       if (typeof actual !== 'number') return false;
       return (e.min === undefined || actual >= Number(e.min)) && (e.max === undefined || actual <= Number(e.max));
@@ -215,6 +221,7 @@ class SimBoard {
   private oneWire = new Map<number, OneWireBus>();
   private pcf = new Map<number, Pcf8574>();
   private ads = new Map<number, Ads1115>();
+  private oleds = new Map<number, OledModel>();
   private modbus = new ModbusBus();
 
   constructor(private id: string, private chip: AdcChip = 'esp32') {}
@@ -279,6 +286,7 @@ class SimBoard {
     if (kind === 'relay' && a !== undefined) return ((this.expander(0x24).latch >> (Number(a) - 1)) & 1) === 0;
     if (kind === 'gpio' && a !== undefined) return (this.dout.get(Number(a)) ?? 0) === 1;
     if (kind === 'pcf' && b !== undefined) return ((this.expander(Number(a)).latch >> Number(b)) & 1) === 1;
+    if (kind === 'display' && a !== undefined) return this.oleds.get(Number(a))?.text() ?? '';
     if (kind === 'event' && a !== undefined) return this.events().includes(key.slice(6));
     if (kind === 'modbus' && b !== undefined) return this.modbus.get(Number(a), Number(b));
     const state = this.state();
@@ -305,6 +313,15 @@ class SimBoard {
       }
     }
     return out;
+  }
+
+  /** 0x3C/0x3D are a display unless the test uses them as a PCF8574A. */
+  private isOled(address: number): boolean { return (address === 0x3c || address === 0x3d) && !this.pcf.has(address); }
+
+  private oled(address: number): OledModel {
+    let x = this.oleds.get(address);
+    if (!x) this.oleds.set(address, (x = new OledModel()));
+    return x;
   }
 
   private adc1115(address: number): Ads1115 {
@@ -385,16 +402,20 @@ class SimBoard {
       micros: () => BigInt(Math.round(b.now * 1000)),
       random: (max: number) => Math.floor(Math.random() * max),
       print(ptr: number, bytes: number) { b.log += b.str16(ptr, bytes); if (b.log.length > 20000) b.log = b.log.slice(-10000); },
+      ...numberImports({ mem: () => b.mem(), str16: (ptr, bytes) => b.str16(ptr, bytes), print: (text) => { b.log += text; } }),
+      ...jsonImports({ mem: () => b.mem(), str16: (ptr, bytes) => b.str16(ptr, bytes), sendFrame: (text) => { b.sent.push(text); }, print: (text) => { b.log += text; } }),
       i2cBegin: () => 0,
       i2cWrite(addr: number, ptr: number, len: number) {
         const data = b.mem().slice(ptr, ptr + len);
         if (isAdsAddress(addr)) { b.adc1115(addr).write(data); return 0; }
+        if (b.isOled(addr)) { b.oled(addr).write(data); return 0; }
         if (!isPcfAddress(addr)) return -1;
         b.expander(addr).write(data);
         return 0;
       },
       i2cRead(addr: number, ptr: number, len: number) {
         if (isAdsAddress(addr)) { b.mem().set(b.adc1115(addr).read(len), ptr); return 0; }
+        if (b.isOled(addr)) { b.mem().set(new Uint8Array(len), ptr); return 0; }
         if (!isPcfAddress(addr)) return -1;
         b.mem().set(b.expander(addr).read(len), ptr);
         return 0;
@@ -437,6 +458,124 @@ class SimBoard {
 function isPcfAddress(addr: number): boolean { return (addr >= 0x20 && addr <= 0x27) || (addr >= 0x38 && addr <= 0x3f); }
 
 function isAdsAddress(addr: number): boolean { return addr >= 0x48 && addr <= 0x4b; }
+
+/**
+ * An SSD1306/SH1106 as the "io" driver uses it (control byte, then commands or data; horizontal
+ * or page addressing), and a reader that finds the 5x7 font's characters in the picture.
+ */
+class OledModel {
+  private ram = new Uint8Array(132 * 8);
+  private col = 0;
+  private page = 0;
+  private mode = 2;
+  private colStart = 0;
+  private colEnd = 127;
+  private pageStart = 0;
+  private pageEnd = 7;
+  private offset = 0; // SH1106 shows RAM from column 2
+  write(data: Uint8Array): void {
+    let i = 0;
+    while (i < data.length) {
+      const control = data[i++];
+      const single = (control & 0x80) !== 0;
+      const isData = (control & 0x40) !== 0;
+      const end = single ? Math.min(i + 1, data.length) : data.length;
+      if (isData) for (; i < end; i++) this.data(data[i]);
+      else i = this.commands(data, i, end);
+    }
+  }
+  /** A command still waiting for argument bytes (they may come in later transfers). */
+  private pending: { cmd: number; need: number; args: number[] } | null = null;
+  private commands(d: Uint8Array, i: number, end: number): number {
+    while (i < end) {
+      const byte = d[i++];
+      if (this.pending) {
+        this.pending.args.push(byte);
+        if (this.pending.args.length === this.pending.need) { this.run(this.pending.cmd, this.pending.args); this.pending = null; }
+        continue;
+      }
+      const need = [0x81, 0x20, 0xa8, 0xd3, 0xd5, 0xd9, 0xda, 0xdb, 0x8d, 0xad].includes(byte) ? 1 : [0x21, 0x22, 0xa3].includes(byte) ? 2 : byte === 0x29 || byte === 0x2a ? 5 : byte === 0x26 || byte === 0x27 ? 6 : 0;
+      if (need) this.pending = { cmd: byte, need, args: [] };
+      else this.run(byte, []);
+    }
+    return i;
+  }
+  private run(c: number, a: number[]): void {
+    if (c === 0x20) this.mode = a[0] & 3;
+    else if (c === 0x21) { this.colStart = a[0] & 0x7f; this.colEnd = a[1] & 0x7f; this.col = this.colStart; this.offset = 0; }
+    else if (c === 0x22) { this.pageStart = a[0] & 7; this.pageEnd = a[1] & 7; this.page = this.pageStart; }
+    else if (c >= 0xb0 && c <= 0xb7) this.page = c & 7;
+    else if (c <= 0x0f) this.col = (this.col & 0xf0) | c;
+    else if (c >= 0x10 && c <= 0x1f) this.col = (this.col & 0x0f) | ((c & 0x0f) << 4);
+    else if (c === 0xad) this.offset = 2; // only the SH1106 has a DC-DC command
+  }
+  private data(b: number): void {
+    this.ram[this.page * 132 + Math.min(this.col, 131)] = b;
+    if (this.mode === 0) {
+      this.col++;
+      if (this.col > this.colEnd) { this.col = this.colStart; this.page = this.page >= this.pageEnd ? this.pageStart : this.page + 1; }
+    } else if (this.col < 131) this.col++;
+  }
+  private lit(x: number, y: number): boolean {
+    if (x < 0 || x > 127 || y < 0 || y > 63) return false;
+    return ((this.ram[(y >> 3) * 132 + x + this.offset] >> (y & 7)) & 1) === 1;
+  }
+  /** The text on the screen: each line of characters, top to bottom (dark text on a bar too). */
+  text(): string {
+    // Vertical 7-pixel slices at a text size: bit r set when pixel (x, y + r * size) is lit.
+    const column = (x: number, y: number, size: number): number => {
+      let v = 0;
+      for (let r = 0; r < 7; r++) if (this.lit(x, y + r * size)) v |= 1 << r;
+      return v;
+    };
+    const byColumns = new Map<string, number>();
+    for (let i = 1; i < FONT5X7.length / 5; i++) byColumns.set(FONT5X7.slice(i * 5, i * 5 + 5).join(','), i === 95 ? 0xb0 : 32 + i);
+    const pixels = (code: number): number => {
+      const i = code === 0xb0 ? 95 : code - 32;
+      let n = 0;
+      for (let k = 0; k < 5; k++) for (let v = FONT5X7[i * 5 + k]; v; v >>= 1) n += v & 1;
+      return n;
+    };
+    // One text line at (y, size): the characters found, scored by the font pixels they cover (so
+    // a real line beats a stray edge that looks like a row of underscores).
+    const read = (y: number, size: number): { text: string; score: number } => {
+      const cols = Array.from({ length: 128 + 6 * size }, (_, x) => column(x, y, size));
+      let best = { text: '', score: 0 };
+      for (const inverse of [false, true]) {
+        const c = inverse ? cols.map((v) => ~v & 0x7f) : cols;
+        let row = '';
+        let hits = 0;
+        let score = 0;
+        let x = 0;
+        while (x <= 128 - 5 * size) {
+          const glyph = [0, 1, 2, 3, 4].map((k) => c[x + k * size]);
+          const code = c[x + 5 * size] === 0 ? byColumns.get(glyph.join(',')) : undefined;
+          if (code !== undefined) { row += String.fromCharCode(code); hits++; score += pixels(code) * size * size; x += 6 * size; }
+          else { if (row && !row.endsWith(' ')) row += ' '; x += 1; }
+        }
+        if (hits >= 2 && score > best.score) best = { text: row.trim().replace(/ {2,}/g, ' '), score };
+      }
+      return best;
+    };
+    const lines: string[] = [];
+    let y = 0;
+    while (y <= 57) {
+      // The best line starting within the next few rows, at either size.
+      let pick: { y: number; size: number; text: string; score: number } | null = null;
+      for (let yy = y; yy <= Math.min(y + 7, 57); yy++) {
+        for (const size of [1, 2]) {
+          if (yy + 7 * size > 64) continue;
+          const r = read(yy, size);
+          if (r.score > 0 && (!pick || r.score > pick.score)) pick = { y: yy, size, ...r };
+        }
+      }
+      if (!pick || pick.score < 12) { y += 8; continue; }
+      lines.push(pick.text);
+      y = pick.y + 8 * pick.size;
+    }
+    return lines.join('\n');
+  }
+}
 
 /** A PCF8574 (one port byte per transfer) or PCF8575 (two: P0x then P1x). */
 class Pcf8574 {

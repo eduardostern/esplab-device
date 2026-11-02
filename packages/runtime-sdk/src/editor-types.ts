@@ -38,10 +38,14 @@ declare module "esp" {
   export function micros(): i64;
   /** Random integer in [0, max). */
   export function random(max: i32): i32;
-  /** Write text to the serial console. */
-  export function print(text: string): void;
-  /** Write text and a newline to the serial console. */
-  export function println(text?: string): void;
+  /** Write text, a number or a bool to the serial console; numbers whole, or with "decimals" digits. */
+  export function print<T>(value: T, decimals?: i32): void;
+  /** print() and a newline. Print parts one by one (print("t = "); println(t, 1)) rather than joining strings. */
+  export function println<T>(value?: T, decimals?: i32): void;
+  /** A number as text: whole numbers without decimals, others shortest, or with "decimals" digits. */
+  export function numText(v: f64, decimals?: i32): string;
+  /** The number at the start of the text (like parseFloat): NaN if there is none. */
+  export function parseNum(text: string): f64;
   /** Start the I2C bus. Returns 0 on success. */
   export function i2cBegin(sda: i32, scl: i32, hz: i32): i32;
   /** Write bytes to a 7-bit I2C address. Returns 0 on success. */
@@ -66,11 +70,16 @@ declare module "lab" {
     /** A debounced digital input: events "<name>.on" / "<name>.off". */
     input(name: string, pin: i32, activeLow?: bool, debounceMs?: i32, pullup?: bool): Input;
     /** A push button to GND: "<name>.on" when pressed. */
+    /** A push button to GND: "<name>.press" short press, "<name>.long" held 800 ms (.autoRepeat(ms) for ".repeat", .doublePress(ms) for ".double"). */
     button(name: string, pin: i32): Input;
     /** A relay on an I2C expander bit (KinCony relays: active low). at labels it, e.g. "R3". */
     relayAt(name: string, expander: Pcf8574, bit: i32, activeLow?: bool, at?: string): Output;
     /** An input on an I2C expander bit (polled). */
     inputAt(name: string, expander: Pcf8574, bit: i32, activeLow?: bool, debounceMs?: i32, at?: string): Input;
+    /** A button on an I2C expander bit (to GND), same events as button(). */
+    buttonAt(name: string, expander: Pcf8574, bit: i32): Input;
+    /** The label of a name (or the name). */
+    labelOf(name: string): string;
     /** A command apps and websites can send. */
     command(name: string, handler: (args: Args) => void): void;
     /** Declares an event name (for the manifest). */
@@ -111,7 +120,8 @@ declare module "lab" {
     /** State when the program stops or crashes. */
     failsafe(on: bool): Output;
   }
-  export class Input { readonly value: bool; readonly name: string; label(text: string): Input; }
+  /** Inputs fire "<name>.on"/".off"; buttons also ".press" (short), ".long" (held), ".repeat" (held, with autoRepeat) and ".double". */
+  export class Input { readonly value: bool; readonly name: string; label(text: string): Input; longPress(ms: i32): Input; autoRepeat(ms: i32): Input; doublePress(ms: i32): Input; }
   export class Args {
     readonly number: f64; readonly text: string;
     num(key: string, fallback?: f64): f64; str(key: string): string;
@@ -170,6 +180,19 @@ declare module "io" {
   export class OneWire { constructor(pin: i32); reset(): bool; write(value: i32): void; read(): i32; skip(): void; select(rom: Uint8Array): void; search(): Uint8Array[]; }
   /** DS18B20 probes on one 1-Wire pin; celsius(i) returns the latest reading without blocking. */
   export class Ds18b20 { constructor(pin: i32); readonly count: i32; celsius(i?: i32): f64; scan(): i32; }
+  /** SSD1306 (0.96") or SH1106 (1.3") OLED on I2C, 128x64 or 128x32, address 0x3C/0x3D. Draw, then show(). Text: 5x7 font, 6x8 px per character (21 x 8 at size 1). */
+  export class Ssd1306 {
+    constructor(address?: i32, sda?: i32, scl?: i32, height?: i32, sh1106?: bool);
+    readonly ok: bool; readonly width: i32; readonly height: i32;
+    clear(): void; pixel(x: i32, y: i32, on?: bool): void; line(x0: i32, y0: i32, x1: i32, y1: i32, on?: bool): void;
+    rect(x: i32, y: i32, w: i32, h: i32): void; fillRect(x: i32, y: i32, w: i32, h: i32, on?: bool): void; bar(x: i32, y: i32, w: i32, h: i32, fraction: f64): void;
+    text(x: i32, y: i32, s: string, size?: i32, on?: bool): i32; textRight(y: i32, s: string, size?: i32, xRight?: i32, on?: bool): void; textCenter(y: i32, s: string, size?: i32): void; textWidth(s: string, size?: i32): i32;
+    invert(on: bool): void; contrast(level: i32): void; power(on: bool): void; show(): void;
+  }
+  /** A ready-made front panel: status screen (states, values, outputs) and a settings/commands menu driven by up/down/OK buttons. */
+  export class Panel { constructor(app: App, oled: Ssd1306, up: Input, down: Input, ok: Input, back?: Input | null, title?: string); draw(): void; }
+  /** A number for a small screen: whole above 100, else one decimal, "--" for NaN. */
+  export function shortNumber(v: f64): string;
   /** ADS1115 4-channel 16-bit ADC on I2C (ADDR: GND 0x48, VDD 0x49, SDA 0x4A, SCL 0x4B). Default pins SDA 21, SCL 22. NaN when a read fails. */
   export class Ads1115 { constructor(address?: i32, sda?: i32, scl?: i32); readonly ok: bool; readonly fullScale: f64; gain(fullScaleVolts: f64): Ads1115; volts(channel: i32): f64; diff(p: i32, n: i32): f64; }
   /** SX1276/77/78 (RFM95) LoRa radio. */

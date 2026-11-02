@@ -11,7 +11,7 @@
  * AssemblyScript has no closures: handlers are top-level functions.
  */
 export const LAB_LIB_SOURCE = String.raw`// ESP Lab framework (module "lab"): state machines, events, device model, cloud link.
-import { pinMode, digitalWrite, digitalRead, millis, print, i2cBegin, i2cWrite, i2cRead, OUTPUT, INPUT, INPUT_PULLUP } from "esp";
+import { pinMode, digitalWrite, digitalRead, millis, print, numText, parseNum, i2cBegin, i2cWrite, i2cRead, OUTPUT, INPUT, INPUT_PULLUP } from "esp";
 
 @external("esp", "waitEvent") declare function waitEventRaw(timeoutMs: i32, buf: usize, cap: i32): i32;
 @external("esp", "attachInterrupt") declare function attachInterrupt(pin: i32, mode: i32): void;
@@ -23,6 +23,21 @@ import { pinMode, digitalWrite, digitalRead, millis, print, i2cBegin, i2cWrite, 
 @external("esp", "outputFailsafe") declare function outputFailsafe(pin: i32, level: i32): void;
 @external("esp", "i2cFailsafe") declare function i2cFailsafe(address: i32, value: i32): void;
 @external("esp", "deviceId") declare function deviceIdRaw(out: usize, cap: i32): i32;
+// Messages and frames: the firmware parses received frames and builds outgoing ones (0.13+).
+@external("esp", "msgLoad") declare function msgLoad(ptr: usize, bytes: i32, utf16: i32): i32;
+@external("esp", "msgNum") declare function msgNumRaw(k: usize, kb: i32, s: usize, sb: i32): f64;
+@external("esp", "msgStr") declare function msgStrRaw(k: usize, kb: i32, s: usize, sb: i32, out: usize, cap: i32): i32;
+@external("esp", "msgKind") declare function msgKindRaw(k: usize, kb: i32, s: usize, sb: i32): i32;
+@external("esp", "msgKey") declare function msgKeyRaw(k: usize, kb: i32, index: i32, out: usize, cap: i32): i32;
+@external("esp", "jBegin") declare function jBegin(): void;
+@external("esp", "jCh") declare function jCh(c: i32): void;
+@external("esp", "jRaw") declare function jRaw(ptr: usize, bytes: i32): void;
+@external("esp", "jStr") declare function jStr(ptr: usize, bytes: i32): void;
+@external("esp", "jKey") declare function jKey(ptr: usize, bytes: i32, first: bool): void;
+@external("esp", "jNum") declare function jNum(v: f64): void;
+@external("esp", "jMsg") declare function jMsg(k: usize, kb: i32): void;
+@external("esp", "jSend") declare function jSend(): void;
+@external("esp", "jTake") declare function jTake(out: usize, cap: i32): i32;
 
 const EV_GPIO = 1;
 const EV_MESSAGE = 2;
@@ -108,201 +123,68 @@ export function jsonString(s: string): string {
 
 export function jsonNumber(v: f64): string {
   if (!isFinite(v)) return "null";
-  if (v == Math.floor(v) && Math.abs(v) < 1e15) return (<i64>v).toString();
-  return (Math.round(v * 1000) / 1000).toString();
+  return numText(v == Math.floor(v) ? v : Math.round(v * 1000) / 1000);
 }
 
-/**
- * Builds one outgoing frame in a fixed buffer (UTF-16, as the firmware's send() takes) and sends
- * it without creating strings: programs have one 64 KiB page, so frames must not make garbage.
- */
+/** Builds one outgoing frame in the firmware (no strings are created in the program). */
 class Writer {
-  // buf[0] is reserved for a marker; the text starts at buf[1]. A frame longer than the buffer
-  // (the hello of an app with many settings and labels) is streamed to the firmware in pieces:
-  // marker 1 = "more follows", marker 2 = "last piece" (firmware 0.10+ joins them into one
-  // frame). Radio transports (LoRa) need the whole frame, so for them the buffer grows instead.
-  buf: Uint16Array = new Uint16Array(2049);
-  n: i32 = 1;
-  streamed: bool = false;
-  overflow: bool = false;
-  begin(): Writer { this.n = 1; this.streamed = false; this.overflow = false; return this; }
-  ch(c: i32): Writer {
-    if (this.n >= this.buf.length) this.full();
-    if (!this.overflow) unchecked(this.buf[this.n++] = <u16>c);
-    return this;
-  }
-  full(): void {
-    if (transport != null) {
-      if (this.buf.length >= 16385) { this.overflow = true; return; }
-      const bigger = new Uint16Array((this.buf.length - 1) * 2 + 1);
-      bigger.set(this.buf);
-      this.buf = bigger;
-      return;
-    }
-    unchecked(this.buf[0] = 1);
-    sendRaw(this.buf.dataStart, this.n << 1);
-    this.streamed = true;
-    this.n = 1;
-  }
-  raw(s: string): Writer { for (let i = 0; i < s.length; i++) this.ch(s.charCodeAt(i)); return this; }
-  str(s: string): Writer {
-    this.ch(34);
-    for (let i = 0; i < s.length; i++) {
-      const c = s.charCodeAt(i);
-      if (c == 34 || c == 92) { this.ch(92); this.ch(c); }
-      else if (c == 10) { this.ch(92); this.ch(110); }
-      else if (c < 32) this.ch(32);
-      else this.ch(c);
-    }
-    return this.ch(34);
-  }
-  int(v: i64): Writer {
-    if (v < 0) { this.ch(45); v = -v; }
-    if (v >= 10) this.int(v / 10);
-    return this.ch(<i32>(48 + v % 10));
-  }
-  num(v: f64): Writer {
-    if (!isFinite(v)) return this.raw("null");
-    if (v == Math.floor(v) && Math.abs(v) < 1e15) return this.int(<i64>v);
-    const r = Math.round(v * 1000) / 1000;
-    const whole = <i64>Math.floor(Math.abs(r));
-    let frac = <i64>Math.round((Math.abs(r) - <f64>whole) * 1000);
-    if (r < 0) this.ch(45);
-    this.int(whole);
-    if (frac > 0) {
-      this.ch(46);
-      if (frac < 100) this.ch(48);
-      if (frac < 10) this.ch(48);
-      while (frac % 10 == 0) frac /= 10;
-      this.int(frac);
-    }
-    return this;
-  }
+  begin(): Writer { jBegin(); return this; }
+  ch(c: i32): Writer { jCh(c); return this; }
+  raw(s: string): Writer { jRaw(changetype<usize>(s), s.length << 1); return this; }
+  str(s: string): Writer { jStr(changetype<usize>(s), s.length << 1); return this; }
+  int(v: i64): Writer { jNum(<f64>v); return this; }
+  num(v: f64): Writer { jNum(v); return this; }
   bool(b: bool): Writer { return this.raw(b ? "true" : "false"); }
   /** "key": */
-  key(k: string, first: bool = false): Writer { if (!first) this.ch(44); return this.str(k).ch(58); }
+  key(k: string, first: bool = false): Writer { jKey(changetype<usize>(k), k.length << 1, first); return this; }
+  /** The JSON of a field of the message being handled. */
+  msg(k: string): Writer { jMsg(changetype<usize>(k), k.length << 1); return this; }
   send(): void {
-    if (this.overflow) { print("[lab] frame too large, dropped\n"); return; }
-    if (this.streamed) {
-      unchecked(this.buf[0] = 2);
-      sendRaw(this.buf.dataStart, this.n << 1);
-      return;
+    const t = transport;
+    if (t == null) { jSend(); return; }
+    // A radio sends the frame itself: copy it out of the firmware.
+    let n = jTake(radioBuf.dataStart, radioBuf.byteLength);
+    if (n < 0 && radioBuf.length < 16384) {
+      radioBuf = new Uint16Array(16384);
+      n = jTake(radioBuf.dataStart, radioBuf.byteLength);
     }
-    transmit(this.buf.dataStart + 2, (this.n - 1) << 1);
+    if (n < 0) { print("[lab] frame too large, dropped\n"); return; }
+    t(radioBuf.dataStart, n);
   }
 }
 
+let radioBuf = new Uint16Array(1024);
 const w = new Writer();
 
-/** A parsed JSON value (enough for elp/1 frames). */
-export class Json {
-  kind: i32 = 0; // 0 null, 1 bool, 2 number, 3 string, 4 object, 5 array
-  b: bool = false;
-  n: f64 = 0;
-  s: string = "";
-  keys: string[] = [];
-  items: Json[] = [];
+const MSG_CMD = 1;
+const MSG_CFG = 2;
+const MSG_TIME = 3;
+const MSG_SYNC = 4;
+const MSG_EVT = 5;
+const MSG_SUB = 6;
 
-  get(key: string): Json | null {
-    for (let i = 0; i < this.keys.length; i++) if (this.keys[i] == key) return this.items[i];
-    return null;
-  }
-  str(key: string): string {
-    const v = this.get(key);
-    return v != null && v.kind == 3 ? v.s : "";
-  }
-  num(key: string, fallback: f64 = NaN): f64 {
-    const v = this.get(key);
-    if (v == null) return fallback;
-    if (v.kind == 2) return v.n;
-    if (v.kind == 1) return v.b ? 1 : 0;
-    return fallback;
-  }
-  get isNumber(): bool { return this.kind == 2 || this.kind == 1; }
-  get number(): f64 { return this.kind == 1 ? (this.b ? 1 : 0) : this.n; }
+/** A field of the message being handled: msg[key], or msg[key][sub]. NaN when not a number. */
+function msgNumber(key: string, sub: string = ""): f64 {
+  return msgNumRaw(changetype<usize>(key), key.length << 1, changetype<usize>(sub), sub.length << 1);
+}
+/** "" when not text. */
+function msgText(key: string, sub: string = ""): string {
+  const n = msgStrRaw(changetype<usize>(key), key.length << 1, changetype<usize>(sub), sub.length << 1, buffer.dataStart, BUF_SIZE);
+  return n < 0 ? "" : String.UTF16.decodeUnsafe(buffer.dataStart, n);
+}
+/** 0 missing, 1 null, 2 bool, 3 number, 4 string, 5 object, 6 array. */
+function msgKind(key: string, sub: string = ""): i32 {
+  return msgKindRaw(changetype<usize>(key), key.length << 1, changetype<usize>(sub), sub.length << 1);
+}
+/** The index-th key of the object msg[key], or null. */
+function msgKeyAt(key: string, index: i32): string | null {
+  const n = msgKeyRaw(changetype<usize>(key), key.length << 1, index, buffer.dataStart, BUF_SIZE);
+  return n < 0 ? null : String.UTF16.decodeUnsafe(buffer.dataStart, n);
 }
 
-class JsonParser {
-  i: i32 = 0;
-  constructor(public t: string) {}
-  ws(): void { while (this.i < this.t.length && this.t.charCodeAt(this.i) <= 32) this.i++; }
-  value(): Json {
-    this.ws();
-    const v = new Json();
-    if (this.i >= this.t.length) return v;
-    const c = this.t.charCodeAt(this.i);
-    if (c == 123) { // {
-      v.kind = 4; this.i++;
-      this.ws();
-      if (this.t.charCodeAt(this.i) == 125) { this.i++; return v; }
-      while (this.i < this.t.length) {
-        this.ws();
-        const key = this.string();
-        this.ws();
-        if (this.t.charCodeAt(this.i) == 58) this.i++;
-        v.keys.push(key);
-        v.items.push(this.value());
-        this.ws();
-        const d = this.t.charCodeAt(this.i++);
-        if (d != 44) break;
-      }
-    } else if (c == 91) { // [
-      v.kind = 5; this.i++;
-      this.ws();
-      if (this.t.charCodeAt(this.i) == 93) { this.i++; return v; }
-      while (this.i < this.t.length) {
-        v.items.push(this.value());
-        this.ws();
-        const d = this.t.charCodeAt(this.i++);
-        if (d != 44) break;
-      }
-    } else if (c == 34) {
-      v.kind = 3; v.s = this.string();
-    } else if (c == 116 || c == 102) { // true / false
-      v.kind = 1; v.b = c == 116; this.i += v.b ? 4 : 5;
-    } else if (c == 110) { // null
-      this.i += 4;
-    } else {
-      const start = this.i;
-      while (this.i < this.t.length) {
-        const d = this.t.charCodeAt(this.i);
-        if ((d >= 48 && d <= 57) || d == 45 || d == 43 || d == 46 || d == 101 || d == 69) this.i++;
-        else break;
-      }
-      v.kind = 2; v.n = parseFloat(this.t.substring(start, this.i));
-    }
-    return v;
-  }
-  string(): string {
-    if (this.t.charCodeAt(this.i) != 34) return "";
-    this.i++;
-    let out = "";
-    while (this.i < this.t.length) {
-      const c = this.t.charCodeAt(this.i++);
-      if (c == 34) break;
-      if (c == 92) {
-        const e = this.t.charCodeAt(this.i++);
-        if (e == 110) out += "\n";
-        else if (e == 116) out += "\t";
-        else if (e == 117) { out += String.fromCharCode(<i32>parseInt(this.t.substring(this.i, this.i + 4), 16)); this.i += 4; }
-        else out += String.fromCharCode(e);
-      } else out += String.fromCharCode(c);
-    }
-    return out;
-  }
-}
-
-export function parseJson(text: string): Json { return new JsonParser(text).value(); }
-
-/** The value of the frame's "t" field without parsing the whole frame. */
-function frameType(text: string): string {
-  const at = text.indexOf('"t"');
-  if (at < 0) return "";
-  let i = at + 3;
-  while (i < text.length && (text.charCodeAt(i) == 58 || text.charCodeAt(i) <= 32)) i++;
-  if (i >= text.length || text.charCodeAt(i) != 34) return "";
-  const end = text.indexOf('"', i + 1);
-  return end < 0 || end - i > 12 ? "" : text.substring(i + 1, end);
+/** Two decimal digits of s from "at" ("07" in "07:30"). */
+function twoDigits(s: string, at: i32): i32 {
+  return (s.charCodeAt(at) - 48) * 10 + (s.charCodeAt(at + 1) - 48);
 }
 
 function alwaysTrue(): bool { return true; }
@@ -511,20 +393,72 @@ export class Input {
   expander: Pcf8574 | null = null;
   bit: i32 = -1;
   at: string = "";
+  // Button gestures (0 = off): "<name>.press" on a short press, ".long" once when held
+  // longMs, ".repeat" every repeatMs while held after that, ".double" for a second press within
+  // doubleMs of the first.
+  longMs: i32 = 0;
+  repeatMs: i32 = 0;
+  doubleMs: i32 = 0;
+  pressedAt: i64 = 0;
+  longFired: bool = false;
+  nextRepeat: i64 = 0;
+  lastPress: i64 = -1000000;
+  /** The pin interrupt saw it go active since the last sample (a quick tap). */
+  tapped: bool = false;
   constructor(public app: App, public name: string, public pin: i32, public activeLow: bool, public debounceMs: i32) {
     this.onEvent = name + ".on";
     this.offEvent = name + ".off";
   }
   label(text: string): Input { this.app.label(this.name, text); return this; }
+  /** Fire "<name>.long" when held this long (ms); a short press then stays ".press" only. */
+  longPress(ms: i32): Input { this.longMs = ms; return this; }
+  /** While held past the long press, fire "<name>.repeat" every ms (to step a value up or down). */
+  autoRepeat(ms: i32): Input { this.repeatMs = ms; if (this.longMs == 0) this.longMs = 500; return this; }
+  /** Fire "<name>.double" for a second press within ms of the first. */
+  doublePress(ms: i32): Input { this.doubleMs = ms; return this; }
   sample(now: i64): void {
     const x = this.expander;
     const r = ((x != null ? x.readBit(this.bit) : digitalRead(this.pin)) == 1) != this.activeLow;
     if (r != this.raw) { this.raw = r; this.rawAt = now; }
+    if (this.tapped && !r && !this.value) {
+      // Pressed and released between two samples: report the whole tap.
+      this.tapped = false;
+      this.app.changed = true;
+      this.app.dispatch(this.onEvent);
+      this.app.dispatch(this.offEvent);
+      this.app.dispatch(this.name + ".press");
+      if (this.doubleMs > 0 && now - this.lastPress <= <i64>this.doubleMs) { this.app.dispatch(this.name + ".double"); this.lastPress = -1000000; }
+      else this.lastPress = now;
+      return;
+    }
+    if (r) this.tapped = false;
     if (this.raw != this.value && now - this.rawAt >= this.debounceMs) {
       this.value = this.raw;
       this.dirty = true;
       this.app.changed = true;
       this.app.dispatch(this.value ? this.onEvent : this.offEvent);
+      if (this.value) {
+        this.pressedAt = now;
+        this.longFired = false;
+      } else if (!this.longFired) {
+        this.app.dispatch(this.name + ".press");
+        if (this.doubleMs > 0 && now - this.lastPress <= <i64>this.doubleMs) {
+          this.app.dispatch(this.name + ".double");
+          this.lastPress = -1000000;
+        } else {
+          this.lastPress = now;
+        }
+      }
+    }
+    if (this.value && this.longMs > 0) {
+      if (!this.longFired && now - this.pressedAt >= <i64>this.longMs) {
+        this.longFired = true;
+        this.nextRepeat = now + <i64>this.repeatMs;
+        this.app.dispatch(this.name + ".long");
+      } else if (this.longFired && this.repeatMs > 0 && now >= this.nextRepeat) {
+        this.nextRepeat = now + <i64>this.repeatMs;
+        this.app.dispatch(this.name + ".repeat");
+      }
     }
   }
 }
@@ -537,13 +471,17 @@ export class Command {
 export class Args {
   result: string = "null";
   error: string = "";
-  constructor(public value: Json) {}
+  /** live: the arguments are the "v" of the message being handled; otherwise there are none. */
+  constructor(public live: bool = false) {}
   /** The command's value as a number (NaN when absent). */
-  get number(): f64 { return this.value.isNumber ? this.value.number : NaN; }
-  get text(): string { return this.value.kind == 3 ? this.value.s : ""; }
+  get number(): f64 { return this.live ? msgNumber("v") : NaN; }
+  get text(): string { return this.live ? msgText("v") : ""; }
   /** A named argument: {"v": {"minutes": 30}}. */
-  num(key: string, fallback: f64 = NaN): f64 { return this.value.kind == 4 ? this.value.num(key, fallback) : fallback; }
-  str(key: string): string { return this.value.kind == 4 ? this.value.str(key) : ""; }
+  num(key: string, fallback: f64 = NaN): f64 {
+    const kind = this.live ? msgKind("v", key) : 0;
+    return kind == 2 || kind == 3 ? msgNumber("v", key) : fallback;
+  }
+  str(key: string): string { return this.live ? msgText("v", key) : ""; }
   reply(v: f64): void { this.result = jsonNumber(v); }
   replyText(s: string): void { this.result = jsonString(s); }
   fail(message: string): void { this.error = message; }
@@ -755,7 +693,7 @@ export class App {
   setting(name: string, unit: string, def: f64, min: f64 = -Infinity, max: f64 = Infinity): Setting {
     const s = new Setting(this, name, unit, def, min, max);
     const stored = loadText("s." + name);
-    if (stored != null) s.value = parseFloat(stored);
+    if (stored != null) s.value = parseNum(stored);
     if (isNaN(s.value)) s.value = def;
     this.settings.push(s);
     return s;
@@ -778,8 +716,14 @@ export class App {
     this.inputs.push(i);
     return i;
   }
-  /** A push button to GND (active low, pulled up). Fires "<name>.on" when pressed. */
-  button(name: string, pin: i32): Input { return this.input(name, pin, true, 30, true); }
+  /**
+   * A push button to GND (active low, pulled up). Fires "<name>.on" / ".off" as it goes down and
+   * up, "<name>.press" for a short press and "<name>.long" when held 800 ms; add .autoRepeat(ms)
+   * and .doublePress(ms) for more.
+   */
+  button(name: string, pin: i32): Input { return this.input(name, pin, true, 30, true).longPress(800); }
+  /** A push button on an I2C expander bit (to GND), with the same events as button(). */
+  buttonAt(name: string, expander: Pcf8574, bit: i32): Input { return this.inputAt(name, expander, bit, true, 30).longPress(800); }
   /** A relay on an I2C expander bit (KinCony relays are active low). "at" labels it, e.g. "R3". */
   relayAt(name: string, expander: Pcf8574, bit: i32, activeLow: bool = true, at: string = ""): Output {
     const o = new Output(this, name, -1, activeLow);
@@ -815,6 +759,19 @@ export class App {
     if (i >= 0) this.labelTexts[i] = text;
     else { this.labelKeys.push(name); this.labelTexts.push(text); }
   }
+  /** The label given with label(), or the name itself. */
+  labelOf(name: string): string {
+    const i = this.labelKeys.indexOf(name);
+    return i >= 0 ? this.labelTexts[i] : name;
+  }
+  /** A setting changed on the device itself (front panel, local page): applied, kept and sent to ESP Lab. */
+  setLocally(setting: Setting, v: f64): void {
+    setting.set(v);
+    if (!this.localCfg.includes(setting.name)) this.localCfg.push(setting.name);
+    saveText("cfglocal", this.localCfg.join(","));
+    this.sendLocalCfg();
+    this.dispatch("config");
+  }
   /** Declares an event name (for the manifest; emit() works without it). */
   event(name: string): void { this.events.push(name); }
   /** A state machine with these states; the first is the initial state. */
@@ -830,8 +787,8 @@ export class App {
   after(ms: i32, fn: () => void): void { this.timers.push(new Timer(fn, ms, millis() + ms, false)); }
   /** Daily at "HH:MM" local time (see timezone()); needs the clock from ESP Lab. */
   at(hhmm: string, fn: () => void): void {
-    const h = <i32>parseInt(hhmm.substring(0, 2));
-    const m = <i32>parseInt(hhmm.substring(3, 5));
+    const h = twoDigits(hhmm, 0);
+    const m = twoDigits(hhmm, 3);
     this.schedules.push(new Schedule(h * 60 + m, fn, hhmm));
   }
   /** Minutes east of UTC for at() schedules, e.g. -180 for UTC-3. */
@@ -982,25 +939,22 @@ export class App {
     if (!first) w.raw("}}").send();
   }
 
+  /** A frame as text (from a radio): handled like one from ESP Lab. */
   handleMessage(text: string): void {
-    // Only frames a device acts on are parsed (a full parse costs memory): peek at "t" first.
-    const kind = frameType(text);
-    if (kind == "sub") {
+    const kind = msgLoad(changetype<usize>(text), text.length << 1, 1);
+    if (kind == MSG_SUB) {
       const h = subHandler;
       if (h != null) h(text);
       return;
     }
-    if (kind != "cmd" && kind != "cfg" && kind != "time" && kind != "sync" && kind != "evt") return;
-    if (text.length > 1500) { print("[lab] message too large, ignored\n"); return; }
-    __collect();
-    const msg = parseJson(text);
-    if (msg.kind != 4) return;
-    const t = msg.str("t");
-    if (t == "cmd") {
-      const name = msg.str("n");
-      const id = msg.get("id");
-      const v = msg.get("v");
-      const args = new Args(v != null ? v : new Json());
+    this.handleLoaded(kind);
+  }
+
+  /** The message the firmware just parsed (msgLoad), by kind. */
+  handleLoaded(kind: i32): void {
+    if (kind == MSG_CMD) {
+      const name = msgText("n");
+      const args = new Args(true);
       let found = false;
       for (let i = 0; i < this.commands.length; i++) {
         if (this.commands[i].name == name) {
@@ -1010,21 +964,23 @@ export class App {
         }
       }
       if (!found) args.fail("unknown command " + name);
-      w.begin().raw('{"t":"ack"').key("id");
-      if (id == null) w.raw("null"); else if (id.kind == 3) w.str(id.s); else w.num(id.n);
+      w.begin().raw('{"t":"ack"').key("id").msg("id");
       w.key("ok").bool(args.error.length == 0);
       if (args.error.length) w.key("err").str(args.error); else w.key("v").raw(args.result);
       w.ch(125).send();
       this.changed = true;
-    } else if (t == "cfg") {
-      const v = msg.get("v");
-      const local = msg.get("local") != null;
-      if (v != null && v.kind == 4) {
-        for (let k = 0; k < v.keys.length; k++) {
+    } else if (kind == MSG_CFG) {
+      const local = msgKind("local") != 0;
+      if (msgKind("v") == 5) {
+        for (let k = 0; ; k++) {
+          const key = msgKeyAt("v", k);
+          if (key == null) break;
+          const t = msgKind("v", key);
+          if (t != 2 && t != 3) continue;
           for (let i = 0; i < this.settings.length; i++) {
-            if (this.settings[i].name == v.keys[k] && v.items[k].isNumber) {
-              this.settings[i].set(v.items[k].number);
-              if (local && !this.localCfg.includes(v.keys[k])) this.localCfg.push(v.keys[k]);
+            if (this.settings[i].name == key) {
+              this.settings[i].set(msgNumber("v", key));
+              if (local && !this.localCfg.includes(key)) this.localCfg.push(key);
             }
           }
         }
@@ -1037,17 +993,18 @@ export class App {
         return;
       }
       if (this.localCfg.length) { this.localCfg = []; saveText("cfglocal", ""); }
-      const ver = <i32>msg.num("ver", 0);
-      if (ver > 0) { this.cfgVersion = ver; saveText("cfgver", ver.toString()); }
+      const ver = msgNumber("ver");
+      if (ver > 0) { this.cfgVersion = <i32>ver; saveText("cfgver", this.cfgVersion.toString()); }
       w.begin().raw('{"t":"cfgack"').key("ver").int(this.cfgVersion).ch(125).send();
       this.dispatch("config");
-    } else if (t == "time") {
-      setEpochMs(<i64>msg.num("ms", 0));
-    } else if (t == "sync") {
+    } else if (kind == MSG_TIME) {
+      const ms = msgNumber("ms");
+      setEpochMs(isNaN(ms) ? 0 : <i64>ms);
+    } else if (kind == MSG_SYNC) {
       this.hello();
-    } else if (t == "evt") {
+    } else if (kind == MSG_EVT) {
       // Events from other devices or apps feed the machines and hooks.
-      this.dispatch(msg.str("n"));
+      this.dispatch(msgText("n"));
     }
   }
 
@@ -1055,9 +1012,18 @@ export class App {
 
   run(): void {
     const cv = loadText("cfgver");
-    if (cv != null) this.cfgVersion = <i32>parseInt(cv);
+    if (cv != null) this.cfgVersion = <i32>parseNum(cv);
     const lc = loadText("cfglocal");
-    if (lc != null && lc.length) this.localCfg = lc.split(",");
+    if (lc != null && lc.length) {
+      // Comma-separated setting names (a loop: String#split costs 800 bytes of program).
+      let from = 0;
+      while (from <= lc.length) {
+        let to = lc.indexOf(",", from);
+        if (to < 0) to = lc.length;
+        if (to > from) this.localCfg.push(lc.substring(from, to));
+        from = to + 1;
+      }
+    }
     const now0 = millis();
     for (let i = 0; i < this.sensors.length; i++) this.sensors[i].nextAt = now0;
     for (let i = 0; i < this.inputs.length; i++) {
@@ -1097,7 +1063,13 @@ export class App {
       if (r > 0) {
         const kind = r >>> 24;
         const len = r & 0xffffff;
-        if (kind == EV_MESSAGE) this.handleMessage(String.UTF8.decodeUnsafe(buffer.dataStart, len));
+        if (kind == EV_MESSAGE) {
+          const type = msgLoad(buffer.dataStart, len, 0);
+          if (type == MSG_SUB) {
+            const h = subHandler;
+            if (h != null) h(String.UTF8.decodeUnsafe(buffer.dataStart, len));
+          } else this.handleLoaded(type);
+        }
         else if (kind == EV_NET && len >= 2) {
           if (len >= 3) this.clock = <i32>buffer[2];
           const up = buffer[1] != 0;
@@ -1107,7 +1079,17 @@ export class App {
             this.dispatch(up ? "online" : "offline");
           }
         }
-        // EV_GPIO: inputs are sampled below.
+        else if (kind == EV_GPIO && len >= 2) {
+          // An edge from the pin interrupt: a tap shorter than the time the program was busy
+          // (a display refresh) would otherwise be missed by sampling.
+          const pin = <i32>buffer[0];
+          const level = <i32>buffer[1];
+          for (let i = 0; i < this.inputs.length; i++) {
+            const x = this.inputs[i];
+            if (x.pin == pin && x.expander == null && ((level == 1) != x.activeLow) && !x.value) x.tapped = true;
+          }
+        }
+        // Inputs are sampled below.
       }
       for (let i = 0; i < pinWatchFns.length; i++) pinWatchFns[i]();
 

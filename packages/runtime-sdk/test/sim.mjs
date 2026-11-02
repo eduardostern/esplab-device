@@ -2,6 +2,9 @@
 // and simulated hardware (Modbus slave, DS18B20 bus, SX127x radio).
 import crypto from 'node:crypto';
 
+import { jsonImports } from '../src/json-host.ts';
+import { numberImports } from '../src/numfmt.ts';
+
 export class Device {
   constructor({ id = 'esp32-aabbccddeeff', script = [], hardware = {}, kv = new Map() } = {}) {
     this.id = id;
@@ -66,6 +69,8 @@ export class Device {
       micros() { return BigInt(d.now * 1000); },
       random(max) { return Math.floor(Math.random() * max); },
       print(ptr, bytes) { d.log += d.str16(ptr, bytes); },
+      ...numberImports({ mem: () => d.mem(), str16: (ptr, bytes) => d.str16(ptr, bytes), print: (text) => { d.log += text; } }),
+      ...jsonImports({ mem: () => d.mem(), str16: (ptr, bytes) => d.str16(ptr, bytes), sendFrame: (text) => { d.sent.push(text); }, print: (text) => { d.log += text; } }),
       i2cBegin() { return 0; },
       i2cWrite(addr, ptr, len) { const x = d.hw.i2c?.[addr]; if (!x) return -1; x.write(d.mem().slice(ptr, ptr + len)); return 0; },
       i2cRead(addr, ptr, len) { const x = d.hw.i2c?.[addr]; if (!x) return -1; d.mem().set(x.read(len), ptr); return 0; },

@@ -7,3 +7,7 @@ export * from './reference';
 export * from './editor-types';
 export * from './scenario';
 export * from './adc';
+export * from './wasm-size';
+export * from './font5x7';
+export * from './numfmt';
+export * from './json-host';

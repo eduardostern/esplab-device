@@ -10,7 +10,7 @@
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/drivers.test.mjs && tsx test/i2c.test.mjs && tsx test/local.test.mjs"
+    "test": "tsx test/drivers.test.mjs && tsx test/i2c.test.mjs && tsx test/local.test.mjs && tsx test/oled.test.mjs"
   },
   "devDependencies": {
     "assemblyscript": "0.28.20",

@@ -8,6 +8,7 @@ import { ESP_LIB_SOURCE } from './esp-lib';
 import { IO_LIB_SOURCE } from './io-lib';
 import { LAB_LIB_SOURCE } from './lab-lib';
 import { MAX_PROGRAM_BYTES } from './program';
+import { wasmSizeReport, type WasmSizeReport } from './wasm-size';
 
 export interface CompileDiagnostic {
   severity: 'error' | 'warning' | 'info';
@@ -28,6 +29,10 @@ export interface CompileResult {
   /** Plain-text log in the compiler's own format, for the AI and the log panel. */
   log: string;
   durationMs: number;
+  /** What the module is made of (section and function sizes); function names need `wat`. */
+  size?: WasmSizeReport;
+  /** The WebAssembly text format of the same module, when asked for (options.wat). */
+  wat?: string;
 }
 
 /** Subset of the `assemblyscript/asc` module this needs. */
@@ -117,6 +122,8 @@ export async function compileProgram(
   entry = 'main.ts',
   /** Extra compiler flags (tests: e.g. --exportStart to run top-level code after instantiation). */
   extraFlags: string[] = [],
+  /** wat: also produce the text format (to view the compiled program, and to name functions in the size report). */
+  options: { wat?: boolean } = {},
 ): Promise<CompileResult> {
   const started = Date.now();
   const sources: Record<string, string> = { [`${LIB_DIR}/esp.ts`]: ESP_LIB_SOURCE, [`${LIB_DIR}/lab.ts`]: LAB_LIB_SOURCE, [`${LIB_DIR}/io.ts`]: IO_LIB_SOURCE };
@@ -147,7 +154,8 @@ export async function compileProgram(
   const diagnostics: CompileDiagnostic[] = [];
   let log = '';
 
-  const { error } = await asc.main([root, '--outFile', 'program.wasm', ...COMPILER_FLAGS, ...extraFlags], {
+  const textFlags = options.wat ? ['--textFile', 'program.wat'] : [];
+  const { error } = await asc.main([root, '--outFile', 'program.wasm', ...textFlags, ...COMPILER_FLAGS, ...extraFlags], {
     readFile: (name, baseDir) => sources[join(baseDir, name)] ?? null,
     writeFile: (name, contents) => {
       outputs[name] = contents;
@@ -201,9 +209,12 @@ export async function compileProgram(
     .map((d) => `${d.severity.toUpperCase()} ${d.file ?? ''}${d.line ? `:${d.line}:${d.column}` : ''} ${d.message}`.trim())
     .join('\n');
 
+  const wat = typeof outputs['program.wat'] === 'string' ? (outputs['program.wat'] as string) : undefined;
   return {
     ok,
     wasm: ok ? bytes : null,
+    ...(ok && bytes ? { size: wasmSizeReport(bytes, wat) } : {}),
+    ...(ok && wat ? { wat } : {}),
     diagnostics,
     log: ok
       ? `compiled ${entry} -> ${bytes!.length} bytes${summary ? `\n${summary}` : ''}`

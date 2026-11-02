@@ -45,6 +45,7 @@
 #include "freertos/task.h"
 #include "mbedtls/base64.h"
 #include "cJSON.h"
+#include "labhost.h"
 
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
@@ -58,7 +59,7 @@
 void portal_start(void);
 
 #ifndef RUNTIME_VERSION
-#define RUNTIME_VERSION "0.12"
+#define RUNTIME_VERSION "0.13"
 #endif
 #define BLOB_MAGIC "ELRT"
 #define BLOB_HEADER 16
@@ -704,6 +705,8 @@ static void send_frame(const char *text, size_t len) {
   if (!net_cloud_send(text, len)) printf("ESPLAB TX %s\n", text);
 }
 
+void labhost_send_frame(const char *text, size_t len) { send_frame(text, len); }
+
 // A frame longer than the program's buffer arrives in pieces: the first UTF-16 unit is 1 ("more
 // follows") or 2 ("last piece"). They are joined here and sent as one frame (at most 32 KiB).
 static char *partial_frame;
@@ -1116,6 +1119,7 @@ static void *vm_thread(void *arg) {
   }
   wasm_runtime_register_natives("esp", esp_symbols, sizeof(esp_symbols) / sizeof(esp_symbols[0]));
   wasm_runtime_register_natives("env", env_symbols, sizeof(env_symbols) / sizeof(env_symbols[0]));
+  labhost_register();
 
   for (;;) {
     reload_requested = false;
